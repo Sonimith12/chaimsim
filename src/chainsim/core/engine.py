@@ -1,4 +1,4 @@
-"""SimulationEngine: SimPy-based runner that ties nodes, edges, policies, demand, and disruptions together.
+"""SimulationEngine: SimPy-based runner tying together nodes, edges, policies, demand, disruptions.
 
 To be implemented in Phase 1. Advances simulation time using SimPy
 processes, triggers replenishment decisions per node per period, applies
