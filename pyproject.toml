@@ -35,6 +35,7 @@ dependencies = [
     "simpy>=4.1",
     "networkx>=3.2",
     "numpy>=1.26",
+    "pandas>=2.0",
     "gymnasium>=0.29",
     "pydantic>=2.5",
 ]
@@ -42,6 +43,14 @@ dependencies = [
 [project.optional-dependencies]
 opt = [
     "ortools>=9.9",
+]
+examples = [
+    "matplotlib>=3.8",
+]
+notebooks = [
+    "ipykernel>=6.29",
+    "nbclient>=0.10",
+    "nbformat>=5.10",
 ]
 dashboard = [
     "streamlit>=1.32",
@@ -86,7 +95,19 @@ select = [
     "N",   # pep8-naming
     "SIM", # flake8-simplify
 ]
-ignore = []
+ignore = [
+    # Inventory theory has established single/double-letter notation (S, s, R, Q,
+    # D, K, h, EOQ, ...) that reads better matching textbooks than renamed to
+    # satisfy PEP 8 naming conventions.
+    "N801",
+    "N802",
+    "N803",
+    "N806",
+    "N816",
+    # ReplenishmentPolicy.reset() is an intentional no-op extension point, not
+    # an oversight.
+    "B027",
+]
 
 [tool.ruff.lint.isort]
 known-first-party = ["chainsim"]

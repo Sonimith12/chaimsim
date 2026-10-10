@@ -4,8 +4,10 @@ An open-source Python framework for simulating supply chain networks,
 designed from the ground up to plug into modern AI/ML workflows — not just
 a discrete-event simulator that happens to produce data.
 
-> **Status:** early scaffolding (Phase 0). Domain logic is not implemented
-> yet — see [docs/architecture.md](docs/architecture.md) for the full plan.
+> **Status:** all five phases implemented — domain layer, benchmarking/metrics,
+> AI/ML interfaces, pre-built scenarios, and the Streamlit dashboard. See
+> [docs/architecture.md](docs/architecture.md) for the phase-by-phase plan and
+> `examples/` for runnable walkthroughs of each layer.
 
 ## Why
 

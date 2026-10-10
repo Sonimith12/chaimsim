@@ -64,18 +64,19 @@ any UI code — fully usable from a plain Python script or Jupyter notebook.
 
 - **Phase 0 — Scaffolding** (done): project structure, `pyproject.toml`,
   ruff + pytest config, Makefile, placeholder README.
-- **Phase 1 — Domain Layer Core** (`core/`): nodes, edges, network, demand,
-  policies, perishability, disruptions, engine. Deliverable:
+- **Phase 1 — Domain Layer Core** (done) (`core/`): nodes, edges, network,
+  demand, policies, perishability, disruptions, engine. Deliverable:
   `examples/01_quickstart.py`.
-- **Phase 2 — Benchmarking & Metrics** (`metrics/`): KPIs, scenario sweeps,
-  comparisons. Deliverable: `examples/02_custom_policy.py`.
-- **Phase 3 — AI/ML Interfaces** (`ai/`): Gymnasium env, forecaster
+- **Phase 2 — Benchmarking & Metrics** (done) (`metrics/`): KPIs, scenario
+  sweeps, comparisons. Deliverable: `examples/02_custom_policy.py`.
+- **Phase 3 — AI/ML Interfaces** (done) (`ai/`): Gymnasium env, forecaster
   protocol, baseline agents. Deliverables: `examples/03_rl_training.ipynb`,
   `examples/04_forecast_benchmark.ipynb`.
-- **Phase 4 — Pre-built Scenarios** (`scenarios/`): retail replenishment,
-  pharma cold chain, manufacturing JIT, global commodity flow.
-- **Phase 5 — Dashboard** (`dashboard/`): Streamlit app calling only the
-  public `chainsim` API.
+- **Phase 4 — Pre-built Scenarios** (done) (`scenarios/`): retail
+  replenishment, pharma cold chain, manufacturing JIT, global commodity
+  flow — each runnable via `python -m chainsim.scenarios.<name>`.
+- **Phase 5 — Dashboard** (done) (`dashboard/`): Streamlit app calling only
+  the public `chainsim` API. Run with `streamlit run dashboard/app.py`.
 
 See the full project brief for detailed per-module responsibilities,
 coding conventions, and what NOT to build.
