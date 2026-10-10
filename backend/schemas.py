@@ -47,6 +47,13 @@ class ResetCommand(BaseModel):
     type: Literal["reset"]
 
 
+class EventActionCommand(BaseModel):
+    type: Literal["event_action"]
+    event_id: int  # uid of the pending event card
+    choice_id: str
+    auto: bool = False  # true when the countdown ran out and the worst option was applied
+
+
 class PolicyChangeCommand(BaseModel):
     type: Literal["policy_change"]
     node_id: str
@@ -61,8 +68,9 @@ class StateMessage(BaseModel):
     type: Literal["state"] = "state"
     state: dict[str, Any]
     # Set on the reply to a policy change so the client can confirm it applied.
-    event: Literal["policy_changed"] | None = None
+    event: Literal["policy_changed", "event_resolved"] | None = None
     node_id: str | None = None
+    outcome: dict[str, Any] | None = None
 
 
 class ErrorMessage(BaseModel):

@@ -12,6 +12,7 @@ export interface RunRecord {
   stars: number
   objectives: Objective[]
   stats: RunStats
+  bankrupt: boolean
   finishedAt: number
 }
 

@@ -1,4 +1,5 @@
 import { useGameStore } from '../store/gameStore'
+import { useCampaignStore } from '../store/campaignStore'
 import { useEditStore } from '../store/editStore'
 import { useHistoryStore } from '../store/historyStore'
 import { useSimStore } from '../store/simStore'
@@ -8,9 +9,18 @@ import { closeSocket, connectSocket, sendCommand, setMessageHandler } from './us
 // True while a step command is out and its reply hasn't arrived yet, so the
 // auto-play timer can't pile up requests faster than the backend answers.
 let stepInFlight = false
+// Auto-play was running when an event interrupted it; resume once it's resolved.
+let resumeAfterEvent = false
 
 const RED = '#f87171'
 const GREEN = '#4ade80'
+const COST_COLORS = {
+  revenue: GREEN,
+  holding: RED,
+  backlog: '#fb923c',
+  policy: '#c084fc',
+  event: '#c084fc',
+} as const
 
 /** Turn the backend's one-off events from a step into on-screen feedback. */
 function showFeedback(state: ServerState) {
@@ -23,10 +33,17 @@ function showFeedback(state: ServerState) {
       game.addFloater(e.node_id, `+${e.points}`, GREEN)
     } else if (e.type === 'milestone' && !state.finished) {
       game.showBanner(`Quarter ${e.quarter} Complete`)
+    } else if (e.type === 'cost') {
+      const sign = e.kind === 'revenue' ? '+' : '-'
+      game.addFloater(
+        e.node_id,
+        `${sign}$${Math.round(e.amount).toLocaleString()}`,
+        COST_COLORS[e.kind],
+      )
+    } else if (e.type === 'cash_crisis' && !state.finished) {
+      game.showBanner('CASH CRISIS')
     }
   }
-  const service = state.objectives.find((o) => o.id === 'service')
-  if (service && !service.met) game.warnScore()
 }
 
 function applyServerState(state: ServerState) {
@@ -36,10 +53,27 @@ function applyServerState(state: ServerState) {
   const game = useGameStore.getState()
   game.setCurrentPeriod(state.period)
   game.setError(null)
-  if (advanced) showFeedback(state)
+  if (state.pending_event) {
+    // A decision event pauses the run until the player chooses.
+    if (game.currentPhase === 'playing') resumeAfterEvent = true
+    if (game.currentPhase === 'playing' || game.currentPhase === 'paused') game.setPhase('paused')
+  }
+  if (state.events.length > 0) showFeedback(state)
+  if (advanced) {
+    const service = state.objectives.find((o) => o.id === 'service')
+    if (service && !service.met) game.warnScore()
+  }
   if (state.finished) {
     game.selectNode(null)
     game.setPhase('results')
+    if (state.result?.campaign && game.mode === 'campaign') {
+      useCampaignStore.getState().recordRun({
+        runKey: `${state.scenario_id}:${state.run_id}`,
+        levelId: state.result.campaign.level,
+        score: state.score.total,
+        stars: state.result.campaign.stars,
+      })
+    }
     if (state.result) {
       useHistoryStore.getState().add({
         runKey: `${state.scenario_id}:${state.run_id}`,
@@ -50,6 +84,7 @@ function applyServerState(state: ServerState) {
         stars: state.result.stars,
         objectives: state.objectives,
         stats: state.result.stats,
+        bankrupt: state.result.bankrupt,
       })
     }
   }
@@ -59,6 +94,12 @@ setMessageHandler((msg: ServerMessage) => {
     applyServerState(msg.state)
     if (msg.event === 'policy_changed' && msg.node_id) {
       useGameStore.getState().flashNode(msg.node_id)
+    }
+    if (msg.event === 'event_resolved' && msg.outcome) {
+      const game = useGameStore.getState()
+      game.addToast(msg.outcome.message, msg.outcome.cash_delta < 0 ? 'warn' : 'info', 7000)
+      if (resumeAfterEvent && !msg.state.finished && !msg.state.pending_event) game.setPhase('playing')
+      resumeAfterEvent = false
     }
   } else {
     stepInFlight = false
@@ -97,10 +138,17 @@ export async function loadScenario(name: string) {
   }
 }
 
+/** Answer the pending decision event. `auto` marks a countdown that ran out. */
+export function chooseEvent(uid: number, choiceId: string, auto = false) {
+  if (!sendCommand({ type: 'event_action', event_id: uid, choice_id: choiceId, auto })) {
+    useGameStore.getState().setError('Not connected to the simulation server.')
+  }
+}
+
 export function step() {
   if (stepInFlight) return
-  const { finished } = useSimStore.getState()
-  if (finished) return
+  const { finished, pendingEvent } = useSimStore.getState()
+  if (finished || pendingEvent) return
   stepInFlight = sendCommand({ type: 'step' })
   if (!stepInFlight) useGameStore.getState().setError('Not connected to the simulation server.')
 }
@@ -119,6 +167,7 @@ export function changePolicy(nodeId: string, policyType: string, params: Record<
 
 export function resetRun() {
   stepInFlight = false
+  resumeAfterEvent = false
   if (sendCommand({ type: 'reset' })) {
     useGameStore.getState().setPhase('paused')
   }
@@ -126,7 +175,8 @@ export function resetRun() {
 
 export function play() {
   const game = useGameStore.getState()
-  if (useSimStore.getState().finished) return
+  const sim = useSimStore.getState()
+  if (sim.finished || sim.pendingEvent) return
   game.setPhase('playing')
 }
 
@@ -143,4 +193,6 @@ export function backToSetup() {
   game.selectNode(null)
   game.setCurrentPeriod(0)
   game.setPhase('setup')
+  // Return to the right menu for the mode the player was in.
+  game.setSetupView(game.mode === 'campaign' ? 'campaign' : 'sandbox')
 }

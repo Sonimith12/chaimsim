@@ -15,6 +15,8 @@ export function ScenarioBuilder() {
   const [scenarios, setScenarios] = useState<ScenarioInfo[]>(FALLBACK)
   const [loading, setLoading] = useState<string | null>(null)
   const error = useGameStore((s) => s.error)
+  const setView = useGameStore((s) => s.setSetupView)
+  const setMode = useGameStore((s) => s.setMode)
 
   useEffect(() => {
     fetch('/api/scenarios')
@@ -25,13 +27,17 @@ export function ScenarioBuilder() {
 
   const pick = async (id: string) => {
     setLoading(id)
+    setMode('sandbox')
     await openPresetForEdit(id)
     setLoading(null)
   }
 
   return (
     <div className="setup">
-      <h1>ChainSim 3D</h1>
+      <button className="link-btn" onClick={() => setView('home')}>
+        ← Back
+      </button>
+      <h1>Sandbox</h1>
       <p className="muted">Pick a scenario to edit, then run it.</p>
       <div className="scenario-grid">
         {scenarios.map((s) => (

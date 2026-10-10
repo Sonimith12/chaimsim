@@ -10,6 +10,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from schemas import (
     CustomScenarioRequest,
+    EventActionCommand,
     ErrorMessage,
     LoadScenarioRequest,
     PolicyChangeCommand,
@@ -17,6 +18,7 @@ from schemas import (
     StateMessage,
     StepCommand,
 )
+import campaign
 from network_spec import NetworkSpec
 from sim_bridge import NetworkSpecError, SimBridge
 
@@ -31,7 +33,7 @@ app.add_middleware(
 # Single-player local game: one simulation shared by REST and the WebSocket.
 bridge = SimBridge()
 
-_Command = TypeAdapter(StepCommand | ResetCommand | PolicyChangeCommand)
+_Command = TypeAdapter(StepCommand | ResetCommand | PolicyChangeCommand | EventActionCommand)
 
 
 @app.get("/api/scenarios")
@@ -79,6 +81,29 @@ def load_from_spec(spec: NetworkSpec) -> dict:
         ) from exc
 
 
+@app.get("/api/campaign")
+def campaign_levels() -> list[dict]:
+    return [level.meta() for level in campaign.LEVELS]
+
+
+@app.post("/api/campaign/{level_id}/start")
+def campaign_start(level_id: int) -> dict:
+    try:
+        return bridge.start_level(level_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/campaign/{level_id}/spec")
+def campaign_spec(level_id: int) -> dict:
+    try:
+        return bridge.level_spec(level_id).model_dump()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+
 @app.get("/api/state")
 def get_state() -> dict:
     if not bridge.loaded:
@@ -102,6 +127,11 @@ async def sim_socket(ws: WebSocket) -> None:
                     reply = StateMessage(state=bridge.step())
                 elif isinstance(command, ResetCommand):
                     reply = StateMessage(state=bridge.reset())
+                elif isinstance(command, EventActionCommand):
+                    state, outcome = bridge.resolve_event(
+                        command.event_id, command.choice_id, command.auto
+                    )
+                    reply = StateMessage(state=state, event="event_resolved", outcome=outcome)
                 else:
                     state = bridge.change_policy(
                         command.node_id, command.policy_type, command.params

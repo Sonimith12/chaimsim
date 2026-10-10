@@ -17,7 +17,10 @@ function ObjectiveList({ objectives }: { objectives: Objective[] }) {
       {objectives.map((o) => (
         <li key={o.id} className={o.bonus ? 'bonus' : ''}>
           <span className={`dot ${o.status}`} title={STATUS_LABEL[o.status]} />
-          <span className="objective-title">{objectiveTitle(o)}</span>
+          <span className="objective-title">
+            {o.tier && <span className={`tier-pill ${o.tier}`}>{o.tier}</span>}
+            {objectiveTitle(o)}
+          </span>
           <span className="objective-actual">{formatValue(o.unit, o.actual)}</span>
         </li>
       ))}

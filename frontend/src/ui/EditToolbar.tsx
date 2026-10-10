@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useEditStore } from '../store/editStore'
+import { nodeBuildCost, useEditStore } from '../store/editStore'
 import type { EditableNodeType } from '../types/sim'
 
 const ADD_BUTTONS: { type: EditableNodeType; label: string }[] = [
@@ -17,6 +17,7 @@ export function EditToolbar() {
   const shiftDown = useEditStore((s) => s.shiftDown)
   const connectFrom = useEditStore((s) => s.connectFrom)
   const sourceName = useEditStore((s) => s.spec?.nodes.find((n) => n.id === connectFrom)?.name)
+  const spec = useEditStore((s) => s.spec)
   const setPlacing = useEditStore((s) => s.setPlacing)
   const setConnectMode = useEditStore((s) => s.setConnectMode)
 
@@ -61,12 +62,16 @@ export function EditToolbar() {
           onClick={() => setPlacing(placing === b.type ? null : b.type)}
         >
           {b.label}
+          {spec && <span className="price">${nodeBuildCost(spec, b.type).toLocaleString()}</span>}
         </button>
       ))}
       <button className={connecting ? 'active' : ''} onClick={() => setConnectMode(!connectMode)}>
         ⤳ Connect
       </button>
       <div className="edit-hint">{hint}</div>
+      <div className="edit-hint">
+        Connections cost ${(spec?.economy.build_cost_per_lead_time ?? 0).toLocaleString()} per unit of lead time
+      </div>
       <div className="edit-hint">Hold Shift to connect quickly</div>
     </div>
   )

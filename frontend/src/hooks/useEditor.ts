@@ -56,6 +56,11 @@ export async function tryStart() {
     const { body } = await postJson('/api/network/validate', spec)
     if (body?.valid) {
       useEditStore.getState().clearInvalid()
+      if (spec.campaign_level) {
+        // Campaign levels have fixed run settings: no modal.
+        await launch({ nPeriods: spec.n_periods, seed: spec.seed ?? 0, events: spec.events_enabled ?? true })
+        return
+      }
       useEditStore.getState().setSettingsOpen(true)
     } else {
       reportIssues(body?.errors ?? [])
@@ -66,10 +71,15 @@ export async function tryStart() {
 }
 
 /** Build and load the edited network with the chosen run settings, then enter play mode. */
-export async function launch(settings: { nPeriods: number; seed: number }) {
+export async function launch(settings: { nPeriods: number; seed: number; events: boolean }) {
   const edit = useEditStore.getState()
   if (!edit.spec) return
-  const spec: NetworkSpec = { ...edit.spec, n_periods: settings.nPeriods, seed: settings.seed }
+  const spec: NetworkSpec = {
+    ...edit.spec,
+    n_periods: settings.nPeriods,
+    seed: settings.seed,
+    events_enabled: settings.events,
+  }
   try {
     const { ok, body } = await postJson('/api/scenario/from_spec', spec)
     if (ok) {

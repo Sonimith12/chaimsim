@@ -15,7 +15,7 @@ from typing import Any
 BASE_POINTS_PER_PERIOD = 1000
 SERVICE_BONUS_PER_PERIOD = 50  # period with >= SERVICE_PERIOD_THRESHOLD of customer nodes in stock
 FILL_BONUS_PER_PERIOD = 25  # period with >= FILL_PERIOD_THRESHOLD of demand fulfilled
-COST_PENALTY_WEIGHT = 0.1  # points lost per unit of total cost
+COST_PENALTY_WEIGHT = 0.05  # points lost per unit of total cost
 WASTE_PENALTY_PER_UNIT = 5
 STOCKOUT_PENALTY = 200
 POLICY_BONUS = 50
@@ -27,6 +27,7 @@ FILL_PERIOD_THRESHOLD = 0.90
 # --- objective targets ---------------------------------------------------------
 TARGET_SERVICE_LEVEL = 0.95
 TARGET_FILL_RATE = 0.90
+TARGET_PROFIT_MARGIN = 0.15
 COST_TARGET_FACTOR = 1.2  # of the scenario's baseline cost
 BORDERLINE_MARGIN = 0.05
 COST_BORDERLINE_FACTOR = 1.15
@@ -55,17 +56,25 @@ class ScoreKeeper:
     completed: int = 0
     service_periods: int = 0
     fill_periods: int = 0
+    # Gains accumulate as earned (a cash crisis halves them); penalties are never scaled.
+    base_points: float = 0.0
+    service_points: float = 0.0
+    fill_points: float = 0.0
     stockouts: int = 0
     policy_changes: int = 0
     policy_bonuses: int = 0
+    stockout_log: list[int] = field(default_factory=list)  # period index of each stockout
     _in_stockout: dict[str, bool] = field(default_factory=dict)
     _period_points: list[float] = field(default_factory=list)
     _pending: list[tuple[int, str]] = field(default_factory=list)  # (completed at change, node)
 
     # -- per-period update -------------------------------------------------------
 
-    def update(self, rows: list[dict]) -> list[dict[str, Any]]:
-        """Fold one processed period's rows in; return the events it produced."""
+    def update(self, rows: list[dict], multiplier: float = 1.0) -> list[dict[str, Any]]:
+        """Fold one processed period's rows in; return the events it produced.
+
+        ``multiplier`` scales the period's point gains (0.5 during a cash crisis).
+        """
         events: list[dict[str, Any]] = []
         sinks = [r for r in rows if r["node_id"] in self.sink_ids] or rows
 
@@ -76,12 +85,19 @@ class ScoreKeeper:
         fill_ok = demand <= 0 or fulfilled / demand >= FILL_PERIOD_THRESHOLD
         self.service_periods += service_ok
         self.fill_periods += fill_ok
+        gain_base = BASE_POINTS_PER_PERIOD * multiplier
+        gain_service = SERVICE_BONUS_PER_PERIOD * service_ok * multiplier
+        gain_fill = FILL_BONUS_PER_PERIOD * fill_ok * multiplier
+        self.base_points += gain_base
+        self.service_points += gain_service
+        self.fill_points += gain_fill
 
         new_stockouts = 0
         for r in rows:
             short = r["backlog"] > _EPS
             if short and not self._in_stockout.get(r["node_id"], False):
                 new_stockouts += 1
+                self.stockout_log.append(self.completed)
                 events.append(
                     {"type": "stockout", "node_id": r["node_id"], "points": -STOCKOUT_PENALTY}
                 )
@@ -91,9 +107,9 @@ class ScoreKeeper:
         period_cost = sum(r["holding_cost"] + r["backlog_cost"] for r in rows)
         waste = sum(r["waste"] for r in rows)
         self._period_points.append(
-            BASE_POINTS_PER_PERIOD
-            + SERVICE_BONUS_PER_PERIOD * service_ok
-            + FILL_BONUS_PER_PERIOD * fill_ok
+            gain_base
+            + gain_service
+            + gain_fill
             - STOCKOUT_PENALTY * new_stockouts
             - COST_PENALTY_WEIGHT * period_cost
             - WASTE_PENALTY_PER_UNIT * waste
@@ -126,9 +142,9 @@ class ScoreKeeper:
 
     def score(self, total_cost: float, waste: float) -> dict[str, float]:
         parts = {
-            "base": BASE_POINTS_PER_PERIOD * self.completed,
-            "service_bonus": SERVICE_BONUS_PER_PERIOD * self.service_periods,
-            "fill_bonus": FILL_BONUS_PER_PERIOD * self.fill_periods,
+            "base": self.base_points,
+            "service_bonus": self.service_points,
+            "fill_bonus": self.fill_points,
             "policy_bonus": POLICY_BONUS * self.policy_bonuses,
             "cost_penalty": -COST_PENALTY_WEIGHT * total_cost,
             "waste_penalty": -WASTE_PENALTY_PER_UNIT * waste,
@@ -142,7 +158,13 @@ class ScoreKeeper:
         return per_period * self.n_periods
 
     def objectives(
-        self, total_cost: float, service_level: float, fill_rate: float, waste: float
+        self,
+        total_cost: float,
+        service_level: float,
+        fill_rate: float,
+        waste: float,
+        profit_margin: float = 0.0,
+        revenue: float = 0.0,
     ) -> list[dict[str, Any]]:
         progress = self.completed / self.n_periods if self.n_periods else 1.0
         t = self.targets
@@ -195,6 +217,25 @@ class ScoreKeeper:
                 "bonus": False,
             },
         ]
+        # Early on there's no revenue to take a margin of; don't flag that as failing.
+        if self.completed == 0 or revenue <= 0:
+            margin_status = "ok"
+        else:
+            margin_status = rate_status(profit_margin, TARGET_PROFIT_MARGIN)
+        out.insert(
+            3,
+            {
+                "id": "profit",
+                "label": "Achieve profit margin of",
+                "unit": "percent",
+                "comparison": "at_least",
+                "target": TARGET_PROFIT_MARGIN,
+                "actual": profit_margin,
+                "met": profit_margin >= TARGET_PROFIT_MARGIN,
+                "status": margin_status,
+                "bonus": False,
+            },
+        )
         if t.bonus == "waste":
             met = waste <= t.max_waste
             out.append(

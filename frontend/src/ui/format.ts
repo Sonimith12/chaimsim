@@ -22,6 +22,7 @@ export function formatValue(unit: Objective['unit'], value: number): string {
 
 /** "Keep total cost under $28,244" / "Bonus: zero stockouts". */
 export function objectiveTitle(o: Objective): string {
+  if (o.title_only) return o.label
   if (o.unit === 'count' && o.target === 0) return o.label
   const target = o.unit === 'percent' ? `${Math.round(o.target * 100)}%+` : formatValue(o.unit, o.target)
   return `${o.label} ${target}`

@@ -46,6 +46,7 @@ export function SupplyChainNode({ node, position: layoutPosition }: Props) {
   const simScale = useSimStore((s) => s.inventoryScale)
   const draftScale = useEditStore((s) => s.spec?.inventory_scale ?? 20)
   const inventoryScale = editing ? draftScale : simScale
+  const showForecast = useGameStore((s) => s.showForecast)
   const connecting = useEditStore((s) => s.connectMode || s.shiftDown)
   const placing = useEditStore((s) => s.placing !== null)
   const isConnectSource = useEditStore((s) => s.connectFrom === node.id)
@@ -273,6 +274,11 @@ export function SupplyChainNode({ node, position: layoutPosition }: Props) {
         <div className={`node-label${selected ? ' selected' : ''}`}>
           <div className="node-label-name">{node.name}</div>
           <div className="node-label-stock">{Math.round(node.on_hand).toLocaleString()} on hand</div>
+          {showForecast && !editing && node.forecast && (
+            <div className="node-label-forecast" title="Expected demand, next 5 periods">
+              🔮 {node.forecast.map((v) => Math.round(v)).join(' · ')}
+            </div>
+          )}
           {node.backlog > 0.5 && (
             <div className="node-label-backlog">
               {Math.round(node.backlog).toLocaleString()} backlog

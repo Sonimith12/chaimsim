@@ -36,6 +36,7 @@ from chainsim.core.nodes import (
     constant_lead_time,
 )
 from chainsim.scenarios._common import ScenarioConfig
+from economy import EconomySpec, infrastructure_cost
 
 MAX_NODES = 10
 NodeType = Literal["Supplier", "Manufacturer", "DistributionCenter", "Retailer"]
@@ -79,6 +80,8 @@ class NodeSpec(BaseModel):
     slot: int = 0
     echelon_size: int = 1
 
+    # Campaign: an approximate demand forecast shown instead of the real parameters.
+    forecast: float | None = None
     initial_inventory: float = 0.0
     holding_cost: float = 1.0
     backlog_cost: float = 0.0
@@ -116,6 +119,23 @@ class NetworkSpec(BaseModel):
     n_periods: int = 52
     seed: int | None = 42
     inventory_scale: float = 20.0
+    economy: EconomySpec = Field(default_factory=EconomySpec)
+    events_enabled: bool = True
+    # Campaign: which level this network is for, and nodes the player can't remove.
+    campaign_level: int | None = None
+    locked_nodes: list[str] = Field(default_factory=list)
+    # Items that came with the preset: they cost nothing to keep.
+    free_nodes: list[str] = Field(default_factory=list)
+    free_edges: list[tuple[str, str]] = Field(default_factory=list)
+
+    def infrastructure_cost(self) -> float:
+        return infrastructure_cost(
+            self.economy,
+            [(n.id, n.type) for n in self.nodes],
+            [(e.source, e.target, e.lead_time) for e in self.edges],
+            set(self.free_nodes),
+            {tuple(p) for p in self.free_edges},
+        )
 
 
 # --- chainsim -> spec -------------------------------------------------------------
@@ -166,6 +186,7 @@ def config_to_spec(
     edge_lead_time,
     inventory_scale: float,
     echelons: dict[str, tuple[int, int, int]],
+    economy: EconomySpec,
 ) -> NetworkSpec:
     """Describe a runnable scenario as editable data (stochastic lead times become their mean)."""
     rng = np.random.default_rng(0)
@@ -220,6 +241,9 @@ def config_to_spec(
         n_periods=config.n_periods,
         seed=42,
         inventory_scale=inventory_scale,
+        economy=economy,
+        free_nodes=[n.id for n in nodes],
+        free_edges=[(e.source, e.target) for e in edges],
     )
 
 
@@ -242,6 +266,12 @@ def validate_spec(spec: NetworkSpec, build_policy) -> list[dict[str, Any]]:
 
     if not spec.nodes:
         return [_error("empty", "The network has no nodes", node_ids=[], edges=[])]
+    for locked in spec.locked_nodes:
+        if locked not in by_id:
+            errors.append(
+                _error("locked_missing", f"{locked} is part of the contract and can't be removed",
+                       node_ids=[], edges=[])
+            )
     if len(spec.nodes) > MAX_NODES:
         errors.append(
             _error("too_many_nodes", f"Too many nodes (maximum {MAX_NODES})", node_ids=[], edges=[])
@@ -251,6 +281,17 @@ def validate_spec(spec: NetworkSpec, build_policy) -> list[dict[str, Any]]:
     if not 1 <= spec.n_periods <= 520:
         errors.append(
             _error("periods", "Number of periods must be between 1 and 520", node_ids=[], edges=[])
+        )
+
+    build = spec.infrastructure_cost()
+    if build > spec.economy.starting_capital:
+        errors.append(
+            _error(
+                "over_budget",
+                f"Build costs ${build:,.0f} exceed the budget of ${spec.economy.starting_capital:,.0f}",
+                node_ids=[],
+                edges=[],
+            )
         )
 
     if not any(n.type in _SOURCE_TYPES for n in spec.nodes):
@@ -281,9 +322,9 @@ def validate_spec(spec: NetworkSpec, build_policy) -> list[dict[str, Any]]:
                        node_ids=[], edges=[key])
             )
             continue
-        if e.lead_time <= 0:
+        if e.lead_time < 1:
             errors.append(
-                _error("lead_time", f"Lead time on {label(e.source)} → {label(e.target)} must be positive",
+                _error("lead_time", f"Lead time on {label(e.source)} → {label(e.target)} must be at least 1",
                        node_ids=[], edges=[key])
             )
         seen.add((e.source, e.target))

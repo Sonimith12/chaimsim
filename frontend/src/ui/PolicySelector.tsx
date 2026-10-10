@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useSimStore } from '../store/simStore'
 import { changePolicy } from '../hooks/useSimulation'
 import type { NodeState, PolicyInfo } from '../types/sim'
 
@@ -75,6 +76,8 @@ export function PolicySelector({ node }: { node: NodeState }) {
     prefill(optionFor(initialType).fields, current),
   )
   const [applied, setApplied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const cost = useSimStore((s) => s.economy?.policy_change_cost ?? 0)
 
   const option = optionFor(type)
   const parsed = option.fields.map((f) => (values[f.key]?.trim() === '' ? NaN : Number(values[f.key])))
@@ -94,6 +97,7 @@ export function PolicySelector({ node }: { node: NodeState }) {
   }
 
   const apply = () => {
+    setConfirming(false)
     const params = Object.fromEntries(option.fields.map((f, i) => [f.key, parsed[i]]))
     if (changePolicy(node.id, type, params)) {
       setApplied(true)
@@ -150,11 +154,32 @@ export function PolicySelector({ node }: { node: NodeState }) {
 
       {problem && <div className="field-problem">{problem}</div>}
 
-      <button className="apply" onClick={apply} disabled={!allValid || problem !== null}>
-        Apply
-      </button>
+      {confirming ? (
+        <div className="confirm-box">
+          <p>
+            Change {node.name} policy to <strong>{option.label}</strong>? Cost:{' '}
+            <strong>${Math.round(cost).toLocaleString()}</strong>
+          </p>
+          <div className="confirm-actions">
+            <button className="primary" onClick={apply}>
+              Confirm
+            </button>
+            <button onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button
+          className="apply"
+          onClick={() => setConfirming(true)}
+          disabled={!allValid || problem !== null}
+        >
+          Apply{cost > 0 ? ` ($${Math.round(cost).toLocaleString()})` : ''}
+        </button>
+      )}
       <div className="policy-note">
-        {applied ? 'Applied — takes effect on the next period.' : 'Changes take effect on the next period.'}
+        {applied
+          ? 'Applied — takes effect on the next period.'
+          : 'Changes take effect on the next period and cost money.'}
       </div>
     </section>
   )

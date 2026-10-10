@@ -39,6 +39,7 @@ function newNode(type: EditableNodeType, id: string, x: number, z: number): Node
     capacity: null,
     shelf_life: null,
     external_lead_time: 1,
+    forecast: null,
     demand: null,
     policy: { type: 'order_up_to', params: { S: 300 } },
   }
@@ -68,6 +69,43 @@ function newNode(type: EditableNodeType, id: string, x: number, z: number): Node
   return base
 }
 
+/** Money spent on nodes/edges that didn't come with the preset (mirrors the backend's rule). */
+export function infrastructureCost(spec: NetworkSpec): number {
+  const e = spec.economy
+  const freeNodes = new Set(spec.free_nodes)
+  const freeEdges = new Set(spec.free_edges.map(([s, t]) => `${s}->${t}`))
+  let total = 0
+  for (const n of spec.nodes) {
+    if (freeNodes.has(n.id)) continue
+    total +=
+      n.type === 'DistributionCenter'
+        ? e.build_cost_dc
+        : n.type === 'Retailer'
+          ? e.build_cost_retailer
+          : e.build_cost_supplier
+  }
+  for (const edge of spec.edges) {
+    if (!freeEdges.has(`${edge.source}->${edge.target}`)) {
+      total += e.build_cost_per_lead_time * edge.lead_time
+    }
+  }
+  return total
+}
+
+export const remainingBudget = (spec: NetworkSpec) =>
+  spec.economy.starting_capital - infrastructureCost(spec)
+
+export function nodeBuildCost(spec: NetworkSpec, type: EditableNodeType): number {
+  const e = spec.economy
+  return type === 'DistributionCenter'
+    ? e.build_cost_dc
+    : type === 'Retailer'
+      ? e.build_cost_retailer
+      : e.build_cost_supplier
+}
+
+const money = (n: number) => `$${Math.round(n).toLocaleString()}`
+
 export function blankSpec(): NetworkSpec {
   return {
     scenario_id: null,
@@ -79,6 +117,24 @@ export function blankSpec(): NetworkSpec {
     n_periods: 52,
     seed: 42,
     inventory_scale: 20,
+    economy: {
+      starting_capital: 30000,
+      revenue_per_unit: 10,
+      ordering_cost: 20,
+      transport_cost_per_lead_time: 10,
+      holding_multiplier: 1,
+      backlog_multiplier: 1,
+      policy_change_cost: 500,
+      overdraft_limit: 5000,
+      bankruptcy_periods: 5,
+      build_cost_supplier: 5000,
+      build_cost_dc: 3000,
+      build_cost_retailer: 2000,
+      build_cost_per_lead_time: 500,
+    },
+    free_nodes: [],
+    free_edges: [],
+    events_enabled: true,
   }
 }
 
@@ -188,6 +244,11 @@ export const useEditStore = create<EditStore>((set, get) => ({
       toast(`A network can have at most ${MAX_NODES} nodes`)
       return
     }
+    const cost = nodeBuildCost(spec, type)
+    if (cost > remainingBudget(spec)) {
+      toast(`Not enough build budget: a ${PREFIX[type]} costs ${money(cost)}, you have ${money(remainingBudget(spec))}`)
+      return
+    }
     const taken = new Set(spec.nodes.map((n) => n.id))
     let n = spec.nodes.filter((node) => node.type === type).length + 1
     while (taken.has(`${PREFIX[type]}_${n}`)) n++
@@ -214,6 +275,10 @@ export const useEditStore = create<EditStore>((set, get) => ({
     if (!spec) return
     const node = spec.nodes.find((n) => n.id === id)
     if (!node) return
+    if (spec.locked_nodes?.includes(id)) {
+      toast(`${node.name} is part of the contract and can't be removed`)
+      return
+    }
     const isSupply = node.type === 'Supplier' || node.type === 'Manufacturer'
     const sameKind = spec.nodes.filter((n) =>
       isSupply ? n.type === 'Supplier' || n.type === 'Manufacturer' : n.type === node.type,
@@ -257,6 +322,11 @@ export const useEditStore = create<EditStore>((set, get) => ({
       toast(`${name(source)} → ${name(target)} already exists`)
       return null
     }
+    const cost = spec.economy.build_cost_per_lead_time * 2
+    if (cost > remainingBudget(spec)) {
+      toast(`Not enough build budget: a connection costs ${money(cost)}, you have ${money(remainingBudget(spec))}`)
+      return null
+    }
     const edge: EdgeSpec = {
       source,
       target,
@@ -292,6 +362,19 @@ export const useEditStore = create<EditStore>((set, get) => ({
   updateEdge: (source, target, patch) => {
     const { spec } = get()
     if (!spec) return
+    // A longer route costs more to build; refuse a change that overspends.
+    if (patch.lead_time !== undefined) {
+      const next = {
+        ...spec,
+        edges: spec.edges.map((e) =>
+          e.source === source && e.target === target ? { ...e, ...patch } : e,
+        ),
+      }
+      if (remainingBudget(next) < 0) {
+        toast(`Not enough build budget for a lead time of ${patch.lead_time}`)
+        return
+      }
+    }
     set({
       spec: {
         ...spec,

@@ -2,7 +2,7 @@ import { Html, Line } from '@react-three/drei'
 import { useFrame } from '@react-three/fiber'
 import { useMemo, useRef, useState } from 'react'
 import { Quaternion, Vector3 } from 'three'
-import { edgeKey, useEditStore } from '../../store/editStore'
+import { edgeKey, remainingBudget, useEditStore } from '../../store/editStore'
 import { useGameStore } from '../../store/gameStore'
 import type { EdgeState } from '../../types/sim'
 import { NumField } from '../../ui/NumField'
@@ -20,15 +20,27 @@ const INVALID = '#ef4444'
 function LeadTimeEditor({ edge, onDone }: { edge: EdgeState; onDone: () => void }) {
   const updateEdge = useEditStore((s) => s.updateEdge)
   const [value, setValue] = useState(edge.lead_time)
+  const spec = useEditStore((s) => s.spec)
+  const isFree = !!spec?.free_edges.some(([s, t]) => s === edge.source && t === edge.target)
+  const perUnit = spec?.economy.build_cost_per_lead_time ?? 0
+  // Budget left if this edge ended up at the typed lead time (original edges cost nothing).
+  const cost = isFree ? 0 : perUnit * value
+  const spare = spec ? remainingBudget(spec) + (isFree ? 0 : perUnit * edge.lead_time) - cost : 0
+  const valid = value >= 1 && spare >= 0
   const commit = () => {
-    if (value > 0) updateEdge(edge.source, edge.target, { lead_time: value })
+    if (valid) updateEdge(edge.source, edge.target, { lead_time: value })
     onDone()
   }
   return (
     <div className="edge-editor">
       <span>Lead time</span>
-      <NumField value={value} min={0.1} onCommit={setValue} onEnter={commit} autoFocus />
-      <button onClick={commit} disabled={!(value > 0)}>
+      <NumField value={value} min={1} onCommit={setValue} onEnter={commit} autoFocus />
+      {!isFree && (
+        <span className={spare < 0 ? 'neg' : 'muted'}>
+          ${Math.round(cost).toLocaleString()}
+        </span>
+      )}
+      <button onClick={commit} disabled={!valid}>
         OK
       </button>
     </div>

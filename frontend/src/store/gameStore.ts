@@ -8,7 +8,8 @@ export interface Toast {
   text: string
   kind: ToastKind
 }
-export type Speed = 'slow' | 'normal' | 'fast'
+export type Speed = 'slow' | 'normal' | 'fast' | 'turbo'
+export type SetupView = 'home' | 'campaign' | 'levelStart' | 'sandbox'
 export type Connection = 'closed' | 'connecting' | 'open'
 
 export interface Floater {
@@ -49,7 +50,17 @@ interface GameStore {
   historyOpen: boolean
   toasts: Toast[]
 
-  addToast: (text: string, kind?: ToastKind) => void
+  addToast: (text: string, kind?: ToastKind, ms?: number) => void
+  mode: 'sandbox' | 'campaign'
+  campaignLevel: number | null
+  setupView: SetupView
+  selectedLevel: number | null
+  showForecast: boolean
+  setMode: (mode: 'sandbox' | 'campaign', level?: number | null) => void
+  setSetupView: (view: SetupView, level?: number | null) => void
+  setShowForecast: (on: boolean) => void
+  eventLogOpen: boolean
+  setEventLogOpen: (open: boolean) => void
   addFloater: (nodeId: string, text: string, color: string) => void
   flashStockout: (nodeId: string) => void
   warnScore: () => void
@@ -80,11 +91,22 @@ export const useGameStore = create<GameStore>((set) => ({
   banner: null,
   historyOpen: false,
   toasts: [],
+  eventLogOpen: false,
+  setEventLogOpen: (eventLogOpen) => set({ eventLogOpen }),
+  mode: 'sandbox',
+  campaignLevel: null,
+  setupView: 'home',
+  selectedLevel: null,
+  showForecast: false,
+  setMode: (mode, level = null) => set({ mode, campaignLevel: mode === 'campaign' ? level : null }),
+  setSetupView: (setupView, level) =>
+    set((s) => ({ setupView, selectedLevel: level === undefined ? s.selectedLevel : level })),
+  setShowForecast: (showForecast) => set({ showForecast }),
 
-  addToast: (text, kind = 'error') => {
+  addToast: (text, kind = 'error', ms = 4500) => {
     const id = nextId++
     set((s) => ({ toasts: [...s.toasts.slice(-3), { id, text, kind }] }))
-    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), 4500)
+    setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), ms)
   },
   addFloater: (nodeId, text, color) => {
     const id = nextId++

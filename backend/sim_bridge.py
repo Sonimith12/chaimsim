@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from chainsim.core.demand import DemandGenerator, SeasonalDemand, StationaryDemand, TrendDemand
+from chainsim.core.disruptions import DemandShock
 from chainsim.core.edges import TransportLink
 from chainsim.core.engine import SimulationEngine
 from chainsim.core.network import SupplyChainNetwork
@@ -33,6 +34,9 @@ from chainsim.scenarios import (
     retail_replenishment,
 )
 from chainsim.scenarios._common import ScenarioConfig
+import campaign as campaign_mod
+from events import EventContext, EventDirector
+from economy import PRESET_ECONOMY, CappedPolicy, EconomySpec, EconomyTracker
 from network_spec import NetworkSpec, config_to_spec, spec_to_config, validate_spec
 from scoring import COST_TARGET_FACTOR, ScoreKeeper, Targets
 
@@ -58,7 +62,7 @@ class _TrackedEngine(SimulationEngine):
     def _init_run(self) -> None:
         super()._init_run()
         self.shipments: dict[int, dict[str, Any]] = {}
-        self._next_shipment_id = 0
+        self.next_shipment_id = 0
         self._shipper: str | None = None
 
     def _ship_downstream(self, node, successors, sku, issued, incoming_orders, t) -> None:
@@ -68,13 +72,24 @@ class _TrackedEngine(SimulationEngine):
         finally:
             self._shipper = None
 
+    def _apply_disruptions(self, t: int) -> None:
+        super()._apply_disruptions(t)
+        # The base engine keeps one demand shock per node (the last listed). Decision
+        # events add more, so combine every active shock on a node by multiplying.
+        grouped: dict[str, float] = {}
+        for event in self.disruptions:
+            if isinstance(event, DemandShock) and event.applies_at(t):
+                grouped[event.target_id] = grouped.get(event.target_id, 1.0) * event.multiplier
+        self._active_demand_shocks = {
+            target: DemandShock(target, t, 1, mult) for target, mult in grouped.items()
+        }
+
     def _deliver(self, node, sku, qty, lead_time):
-        inner = super()._deliver(node, sku, qty, lead_time)
         if self._shipper is None:  # external replenishment of a root node
-            return inner
+            return super()._deliver(node, sku, qty, lead_time)
         depart = int(self.env.now)
-        shipment_id = self._next_shipment_id
-        self._next_shipment_id += 1
+        shipment_id = self.next_shipment_id
+        self.next_shipment_id += 1
         self.shipments[shipment_id] = {
             "id": shipment_id,
             "source": self._shipper,
@@ -83,14 +98,17 @@ class _TrackedEngine(SimulationEngine):
             "depart": depart,
             # The engine delivers at the first step whose period >= depart + lead_time.
             "arrive": max(depart + 1, math.ceil(depart + lead_time)),
+            # Fraction that actually arrives; a quality event can lower it in flight.
+            "keep": 1.0,
         }
-        return self._tracked(shipment_id, inner)
+        return self._deliver_tracked(shipment_id, node, sku, qty, lead_time)
 
-    def _tracked(self, shipment_id: int, inner):
-        try:
-            yield from inner
-        finally:
-            self.shipments.pop(shipment_id, None)
+    def _deliver_tracked(self, shipment_id: int, node, sku, qty, lead_time):
+        # Same behaviour as the base engine's _deliver, but honouring in-flight losses.
+        yield self.env.timeout(lead_time)
+        shipment = self.shipments.pop(shipment_id, None)
+        keep = shipment["keep"] if shipment else 1.0
+        node.receive(qty * keep, sku, period=int(self.env.now))
 
 
 class NetworkSpecError(ValueError):
@@ -144,6 +162,7 @@ def build_policy(policy_type: str, params: dict[str, float]) -> ReplenishmentPol
 def describe_policy(policy: ReplenishmentPolicy | None) -> dict[str, Any] | None:
     if policy is None:
         return None
+    policy = getattr(policy, "inner", policy)  # see through the cash-crisis cap
     if isinstance(policy, OrderUpTo):
         return {"type": "order_up_to", "params": {"S": policy.S}}
     if isinstance(policy, sSPolicy):
@@ -270,6 +289,26 @@ def _inventory_scale(history, network: SupplyChainNetwork) -> float:
     return float(10 * magnitude)
 
 
+def _new_shipments(engine: "_TrackedEngine", before_id: int) -> list[dict[str, Any]]:
+    """Shipments that left during the period just stepped, with their transport terms."""
+    out = []
+    for sid in range(before_id, engine.next_shipment_id):
+        sh = engine.shipments.get(sid)
+        if sh is None:  # already delivered within the same step (zero lead time)
+            continue
+        edge = engine.network.get_edge(sh["source"], sh["target"])
+        out.append(
+            {
+                "source": sh["source"],
+                "target": sh["target"],
+                "qty": sh["qty"],
+                "lead": sh["arrive"] - sh["depart"],
+                "unit_cost": edge.cost_per_unit,
+            }
+        )
+    return out
+
+
 def _finite(value: float) -> float | None:
     return None if value is None or not math.isfinite(value) else float(value)
 
@@ -287,8 +326,22 @@ class SimBridge:
         self.keeper: ScoreKeeper | None = None
         self.run_id = 0
         self.inventory_scale = 1.0
+        self.tracker: EconomyTracker | None = None
+        self.economy = EconomySpec()
+        self.infrastructure = 0.0
         # Node positions chosen in the editor; None for untouched presets.
         self.positions: dict[str, tuple[float, float]] | None = None
+        # Decision events (see events.py).
+        self.preset_id: str | None = None
+        self.events_enabled = True
+        self.director = EventDirector(None, enabled=False)
+        self.pending_event: Any = None
+        self.scheduled: list[Any] = []
+        self.queued_events: list[tuple[int, str, dict[str, Any]]] = []
+        self.event_log: list[dict[str, Any]] = []
+        # Campaign: the level being played (None in sandbox) and the run's baseline targets.
+        self.level: campaign_mod.Level | None = None
+        self.targets: Targets | None = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -314,15 +367,19 @@ class SimBridge:
         if name not in SCENARIOS:
             raise KeyError(f"unknown scenario: {name!r}")
         self.scenario_id = name
+        self.preset_id = name
+        self.level = None
+        self.events_enabled = True
         self.positions = None
-        return self._load(SCENARIOS[name])
+        return self._load(SCENARIOS[name], PRESET_ECONOMY.get(name, EconomySpec()))
 
     def preset_spec(self, name: str) -> dict[str, Any]:
         """A preset described as an editable network spec (for edit mode)."""
         if name not in SCENARIOS:
             raise KeyError(f"unknown scenario: {name!r}")
         config = SCENARIOS[name]()
-        _, scale = self._run_baseline(SCENARIOS[name])
+        economy = PRESET_ECONOMY.get(name, EconomySpec())
+        _, scale = self._run_baseline(SCENARIOS[name], economy)
         network = config.network
         depth: dict[str, int] = {}
         for node in network.topological_order():
@@ -344,6 +401,7 @@ class SimBridge:
             edge_lead_time=self._edge_lead_time,
             inventory_scale=scale,
             echelons=echelons,
+            economy=economy,
         )
         return spec.model_dump()
 
@@ -353,27 +411,59 @@ class SimBridge:
 
     def load_spec(self, spec: NetworkSpec) -> dict[str, Any]:
         """Validate and load an edited network; raises ValueError with the problem list."""
+        level = campaign_mod.get_level(spec.campaign_level) if spec.campaign_level else None
+        if level is not None:
+            # A campaign run is fixed by the level; the client only supplies the network.
+            spec = spec.model_copy(deep=True)
+            spec.n_periods, spec.seed, spec.events_enabled = level.n_periods, level.seed, level.events
+            spec.name = level.name
+            campaign_mod.apply_hidden_demand(level, spec)
         errors = self.validate_network(spec)
         if errors:
             raise NetworkSpecError(errors)
-        self.scenario_id = f"net:{spec.name}"
-        state = self._load(lambda: spec_to_config(spec, build_policy))
+        self.level = level
+        self.scenario_id = f"campaign:{level.id}" if level else f"net:{spec.name}"
+        self.preset_id = None if level else spec.scenario_id
+        self.events_enabled = spec.events_enabled
+        self._load(
+            lambda: spec_to_config(spec, build_policy),
+            spec.economy,
+            infrastructure=spec.infrastructure_cost(),
+        )
         self.positions = {
             n.id: (n.x, n.z) for n in spec.nodes if n.x is not None and n.z is not None
         } or None
         return self.get_state()
 
+    def level_spec(self, level_id: int) -> NetworkSpec:
+        return campaign_mod.get_level(level_id).build(self)
+
+    def start_level(self, level_id: int) -> dict[str, Any]:
+        """Load a fixed campaign level straight into play (levels you don't build yourself)."""
+        level = campaign_mod.get_level(level_id)
+        if level.edit_mode:
+            raise ValueError("This level starts in the network editor")
+        return self.load_spec(level.build(self))
+
     def load_custom(self, config: dict[str, Any]) -> dict[str, Any]:
         self.scenario_id = "custom"
+        self.preset_id = None
+        self.level = None
+        self.events_enabled = True
         self.positions = None
-        return self._load(lambda: build_custom_scenario(config))
+        return self._load(lambda: build_custom_scenario(config), EconomySpec())
 
     def reset(self) -> dict[str, Any]:
         if self._builder is None:
             raise RuntimeError("no scenario loaded")
-        return self._load(self._builder)
+        return self._load(self._builder, self.economy, self.infrastructure)
 
-    def _load(self, builder: Callable[[], ScenarioConfig]) -> dict[str, Any]:
+    def _load(
+        self,
+        builder: Callable[[], ScenarioConfig],
+        economy: EconomySpec,
+        infrastructure: float = 0.0,
+    ) -> dict[str, Any]:
         # Build a fresh config so policy changes from a previous run don't leak in.
         config = builder()
         engine = _TrackedEngine(
@@ -386,10 +476,28 @@ class SimBridge:
         )
         engine.begin()
         self._builder, self.config, self.engine = builder, config, engine
+        self.economy, self.infrastructure = economy, infrastructure
         self.period = 0
         self._last_rows = {}
         self.run_id += 1
-        targets, self.inventory_scale = self._run_baseline(builder)
+        level = self.level
+        self.director = EventDirector(
+            config.seed,
+            enabled=self.events_enabled,
+            chance=level.event_chance if level else None,
+            script=level.event_script if level else None,
+            pool=set(level.event_pool) if level and level.event_pool else None,
+        )
+        self.pending_event = None
+        self.scheduled, self.queued_events, self.event_log = [], [], []
+        self.tracker = EconomyTracker(economy, set(config.demand), infrastructure)
+        # In a cash crisis every node's orders are capped at its current demand.
+        engine.policies = {
+            node_id: CappedPolicy(policy, node_id, self)
+            for node_id, policy in engine.policies.items()
+        }
+        targets, self.inventory_scale = self._run_baseline(builder, economy)
+        self.targets = targets
         self.keeper = ScoreKeeper(
             n_periods=config.n_periods,
             sink_ids={n.id for n in engine.network.sinks()},
@@ -399,17 +507,33 @@ class SimBridge:
         return self.get_state()
 
     @staticmethod
-    def _run_baseline(builder: Callable[[], ScenarioConfig]) -> tuple[Targets, float]:
+    def _run_baseline(
+        builder: Callable[[], ScenarioConfig], economy: EconomySpec
+    ) -> tuple[Targets, float]:
         """Run the scenario once, untouched, and derive objective targets and the
         inventory display scale from that baseline.
         """
         config = builder()
-        engine = config.build_engine()
-        history = engine.run()
+        engine = _TrackedEngine(
+            network=config.network,
+            demand=config.demand,
+            policies=config.policies,
+            disruptions=config.disruptions,
+            n_periods=config.n_periods,
+            seed=config.seed,
+        )
+        engine.begin()
+        tracker = EconomyTracker(economy, set(config.demand))
+        for t in range(config.n_periods):
+            before = engine.next_shipment_id
+            rows = engine.step(t)
+            tracker.update(rows, _new_shipments(engine, before))
+        history = engine.finish()
         summary = summarize(history, engine.network)
         perishable = any(n.is_perishable for n in engine.network.nodes)
         targets = Targets(
-            total_cost=summary["total_cost"] * COST_TARGET_FACTOR,
+            # Total cost is the full cash outlay: holding, backlog, transport, orders.
+            total_cost=tracker.total_costs * COST_TARGET_FACTOR,
             bonus="waste" if perishable else "stockouts",
             max_waste=max(1.0, math.ceil(summary["total_waste"] * COST_TARGET_FACTOR)),
         )
@@ -419,18 +543,90 @@ class SimBridge:
 
     @property
     def finished(self) -> bool:
-        return self.engine is not None and self.period >= self.engine.n_periods
+        if self.engine is None:
+            return False
+        bankrupt = self.tracker is not None and self.tracker.bankrupt
+        return bankrupt or self.period >= self.engine.n_periods
 
     def step(self) -> dict[str, Any]:
         engine = self._require_engine()
         events: list[dict[str, Any]] = []
+        if self.pending_event is not None:
+            raise ValueError("Choose an option for the pending event first")
         if not self.finished:
+            events += self._run_scheduled()
+            before = engine.next_shipment_id
             rows = engine.step(self.period)
             self._last_rows = {row["node_id"]: row for row in rows}
             self.period += 1
-            assert self.keeper is not None
-            events = self.keeper.update(rows)
+            assert self.keeper is not None and self.tracker is not None
+            multiplier = self.tracker.multiplier  # a cash crisis halves point gains
+            events = self.keeper.update(rows, multiplier)
+            events += self.tracker.update(rows, _new_shipments(engine, before))
+            if not self.finished:
+                self.pending_event = self.director.maybe_fire(self)
         return self.get_state(events)
+
+    # -- decision events ----------------------------------------------------------
+
+    def _run_scheduled(self) -> list[dict[str, Any]]:
+        """Delayed effects of earlier events that fall due at the start of this period."""
+        due = [s for s in self.scheduled if s.at <= self.period]
+        if not due:
+            return []
+        self.scheduled = [s for s in self.scheduled if s.at > self.period]
+        ctx = EventContext(self, self.director.rng)
+        for item in due:
+            item.fn(ctx)
+        assert self.tracker is not None
+        return ctx.floaters + self.tracker.reassess()
+
+    def resolve_event(
+        self, uid: int, choice_id: str, auto: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Apply the player's choice for the pending event and return (state, outcome)."""
+        event = self.pending_event
+        if event is None or event.uid != uid:
+            raise ValueError("That event is no longer pending")
+        choice = next((c for c in event.choices if c.id == choice_id), None)
+        if choice is None:
+            raise ValueError(f"unknown choice: {choice_id!r}")
+        assert self.tracker is not None
+
+        ctx = EventContext(self, self.director.rng)
+        cash_before = self.tracker.cash
+        message = choice.apply(ctx)
+        if self.tracker.insured and event.category == "disruption" and ctx.spent > 0:
+            self.tracker.refund_event(ctx.spent)
+            self.tracker.insured = False
+            message += " Insurance covered the cost."
+        events = ctx.floaters + self.tracker.reassess()
+        delta = self.tracker.cash - cash_before
+
+        outcome = {
+            "message": message,
+            "cash_delta": delta,
+            "title": event.title,
+            "choice": choice.label,
+            "auto": auto,
+        }
+        self.event_log.append(
+            {
+                "uid": event.uid,
+                "period": event.period,
+                "event_id": event.def_id,
+                "title": event.title,
+                "icon": event.icon,
+                "category": event.category,
+                "choice_id": choice.id,
+                "choice": choice.label,
+                "outcome": message,
+                "cash_delta": delta,
+                "auto": auto,
+            }
+        )
+        self.pending_event = None
+        return self.get_state(events), outcome
 
     def change_policy(
         self, node_id: str, policy_type: str, params: dict[str, float]
@@ -440,10 +636,16 @@ class SimBridge:
             raise KeyError(f"unknown node: {node_id!r}")
         if self.finished:
             raise ValueError("the run is finished; reset to play again")
-        engine.policies[node_id] = build_policy(policy_type, params)
-        assert self.keeper is not None
+        policy = build_policy(policy_type, params)  # validates before any money moves
+        assert self.keeper is not None and self.tracker is not None
+        if not self.tracker.can_afford_policy_change():
+            raise ValueError(
+                f"Not enough cash to change a policy (costs ${self.economy.policy_change_cost:,.0f})"
+            )
+        events = self.tracker.charge_policy_change(node_id)
+        engine.policies[node_id] = CappedPolicy(policy, node_id, self)
         self.keeper.note_policy_change(node_id)
-        return self.get_state()
+        return self.get_state(events)
 
     # -- state ----------------------------------------------------------------
 
@@ -492,7 +694,15 @@ class SimBridge:
                     "service_level": (
                         _finite(service_level(history, node.id)) if history is not None else None
                     ),
+                    "financials": self.tracker.node_financials(node.id) if self.tracker else None,
                     "avg_demand": float(np.mean(observed)) if observed else 0.0,
+                    # Below one period of typical demand on hand (drives the tutorial hint).
+                    "low_stock": bool(
+                        len(observed) >= 2
+                        and node.id in engine.policies
+                        and node.on_hand_qty(sku) < float(np.mean(observed))
+                    ),
+                    "forecast": self._forecast(node.id),
                     "demand_shock": shock.multiplier if shock is not None else None,
                     "active": bool(row.get("active", True)),
                     "policy": describe_policy(engine.policies.get(node.id)),
@@ -517,9 +727,21 @@ class SimBridge:
         ]
 
         metrics = self._metrics(history)
-        game = self._game_state(metrics)
+        assert self.tracker is not None
+        metrics["total_cost"] = self.tracker.total_costs
+        sink_service = (
+            {
+                n.id: _finite(service_level(history, n.id)) or 0.0
+                for n in network.sinks()
+            }
+            if history is not None
+            else {}
+        )
+        game = self._game_state(metrics, sink_service)
         return {
             "run_id": self.run_id,
+            "pending_event": self.pending_event.public() if self.pending_event else None,
+            "event_log": self.event_log,
             "inventory_scale": self.inventory_scale,
             "events": events or [],
             "scenario_id": self.scenario_id,
@@ -535,32 +757,88 @@ class SimBridge:
             **game,
         }
 
-    def _game_state(self, metrics: dict[str, float | None]) -> dict[str, Any]:
-        keeper = self.keeper
-        assert keeper is not None
+    def _forecast(self, node_id: str, horizon: int = 5) -> list[float] | None:
+        """Expected demand for the next few periods (noise and shocks excluded)."""
+        engine = self._require_engine()
+        gen = engine.demand.get(node_id)
+        if gen is None:
+            return None
+        out = []
+        for t in range(self.period, self.period + horizon):
+            if isinstance(gen, SeasonalDemand):
+                v = gen.base + gen.amplitude * math.sin(2 * math.pi * t / gen.period_length)
+            elif isinstance(gen, TrendDemand):
+                v = gen.base + gen.trend_per_period * t
+            elif isinstance(gen, StationaryDemand):
+                v = gen.mean
+            else:
+                return None
+            out.append(max(0.0, round(v, 1)))
+        return out
+
+    def _game_state(
+        self, metrics: dict[str, float | None], sink_service: dict[str, float]
+    ) -> dict[str, Any]:
+        keeper, tracker = self.keeper, self.tracker
+        assert keeper is not None and tracker is not None
         total_cost = metrics["total_cost"] or 0.0
         waste = metrics["waste"] or 0.0
         service = metrics["service_level"] if metrics["service_level"] is not None else 0.0
         fill = metrics["fill_rate"] if metrics["fill_rate"] is not None else 0.0
 
         score = keeper.score(total_cost, waste)
-        objectives = keeper.objectives(total_cost, service, fill, waste)
+        level = self.level
+        if level is not None:
+            assert self.targets is not None
+            objectives = campaign_mod.evaluate_objectives(
+                level,
+                {
+                    "bankrupt": tracker.bankrupt, "fill": fill, "service": service,
+                    "margin": tracker.margin, "revenue": tracker.revenue, "cash": tracker.cash,
+                    "waste": waste, "max_waste": self.targets.max_waste,
+                    "stockouts": keeper.stockouts, "stockout_log": keeper.stockout_log,
+                    "baseline_cost": self.targets.total_cost / COST_TARGET_FACTOR,
+                    "total_cost": total_cost, "completed": self.period,
+                    "n_periods": keeper.n_periods, "score": score["total"],
+                    "score_max": keeper.max_score(), "sink_service": sink_service,
+                },
+            )
+        else:
+            objectives = keeper.objectives(
+                total_cost, service, fill, waste, tracker.margin, tracker.revenue
+            )
         out: dict[str, Any] = {
             "score": {
                 **score,
                 "max": keeper.max_score(),
-                "status": keeper.overall_status(objectives),
+                "status": "red"
+                if tracker.crisis
+                else keeper.overall_status(
+                    [o for o in objectives if o.get("tier", "required") == "required"]
+                    if level
+                    else objectives
+                ),
+                "multiplier": tracker.multiplier,
+                "stockouts": keeper.stockouts,
+                "policy_changes": keeper.policy_changes,
             },
+            "level": {"id": level.id, "name": level.name, "n_periods": level.n_periods}
+            if level
+            else None,
+            "economy": tracker.summary(),
             "objectives": objectives,
             "result": None,
         }
         if self.finished:
             met = sum(1 for o in objectives if o["met"])
             out["result"] = {
-                "grade": keeper.grade(score["total"]),
-                "stars": 1 + met,  # 1 star for finishing, +1 per objective met
+                "grade": "F" if tracker.bankrupt else keeper.grade(score["total"]),
+                "stars": 1 if tracker.bankrupt else max(1, met),
                 "objectives_met": met,
                 "objectives_total": len(objectives),
+                "bankrupt": tracker.bankrupt,
+                "bankrupt_reason": tracker.bankrupt_reason,
+                "periods_completed": self.period,
                 "stats": {
                     "total_cost": total_cost,
                     "fill_rate": fill,
@@ -568,8 +846,21 @@ class SimBridge:
                     "waste": waste,
                     "stockouts": keeper.stockouts,
                     "policy_changes": keeper.policy_changes,
+                    "revenue": tracker.revenue,
+                    "costs": {
+                        **tracker.costs,
+                        "infrastructure": tracker.infrastructure,
+                        "total": tracker.total_costs,
+                    },
+                    "cash": tracker.cash,
+                    "net_profit": tracker.net_profit,
+                    "margin": tracker.margin,
                 },
             }
+            if level is not None:
+                out["result"]["campaign"] = campaign_mod.campaign_result(
+                    level, objectives, True, tracker.bankrupt
+                )
         return out
 
     def _metrics(self, history) -> dict[str, float | None]:

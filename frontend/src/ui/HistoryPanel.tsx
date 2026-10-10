@@ -10,6 +10,8 @@ function CompareView({ a, b, onBack }: { a: RunRecord; b: RunRecord; onBack: () 
     ['Score', (r) => whole(r.score)],
     ['Grade', (r) => r.grade],
     ['Total cost', (r) => money(r.stats.total_cost)],
+    ['Net profit', (r) => money(r.stats.net_profit)],
+    ['Final cash', (r) => money(r.stats.cash)],
     ['Fill rate', (r) => pct(r.stats.fill_rate)],
     ['Service level', (r) => pct(r.stats.service_level)],
     ['Waste', (r) => whole(r.stats.waste)],
@@ -105,6 +107,7 @@ export function HistoryPanel() {
                 <div className="run-main">
                   <div className="run-name">
                     {r.scenarioName}
+                    {r.bankrupt && <span className="bankrupt-badge">Bankrupt</span>}
                     {bestIds.has(r.id) && <span className="best-badge">Best</span>}
                   </div>
                   <div className="muted">

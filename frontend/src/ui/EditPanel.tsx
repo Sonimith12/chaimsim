@@ -207,7 +207,17 @@ export function EditPanel() {
             )}
           </div>
 
-          {node.type === 'Retailer' && <DemandEditor node={node} />}
+          {node.type === 'Retailer' && node.forecast !== null ? (
+            <section className="policy">
+              <h3>Demand forecast</h3>
+              <p>
+                About <strong>{Math.round(node.forecast)}</strong> units per period.
+              </p>
+              <p className="muted">Forecasts are approximate; actual demand will vary.</p>
+            </section>
+          ) : (
+            node.type === 'Retailer' && <DemandEditor node={node} />
+          )}
           <PolicyEditor node={node} />
         </>
       )}

@@ -4,6 +4,9 @@ import type {
   Metrics,
   NodeState,
   PeriodSnapshot,
+  EconomyState,
+  EventLogEntry,
+  PendingEvent,
   Objective,
   RunResult,
   ScoreState,
@@ -20,6 +23,9 @@ interface SimStore {
   inventoryScale: number
   runId: number
   score: ScoreState | null
+  economy: EconomyState | null
+  pendingEvent: PendingEvent | null
+  eventLog: EventLogEntry[]
   objectives: Objective[]
   result: RunResult | null
   scenarioId: string | null
@@ -44,6 +50,9 @@ const initial = {
   inventoryScale: 1,
   runId: 0,
   score: null,
+  economy: null,
+  pendingEvent: null,
+  eventLog: [],
   objectives: [],
   result: null,
   scenarioId: null,
@@ -84,6 +93,9 @@ export const useSimStore = create<SimStore>((set) => ({
         inventoryScale: data.inventory_scale,
         runId: data.run_id,
         score: data.score,
+        economy: data.economy,
+        pendingEvent: data.pending_event,
+        eventLog: data.event_log,
         objectives: data.objectives,
         result: data.result,
         scenarioId: data.scenario_id,
